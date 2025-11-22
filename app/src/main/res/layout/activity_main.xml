@@ -3,7 +3,6 @@
     android:id="@+id/mainLayout"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:orientation="vertical"
     android:gravity="center"
     android:padding="16dp">
 
@@ -11,38 +10,29 @@
         android:id="@+id/textPermissions"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
+        android:layout_marginBottom="16dp"
         android:text="Requesting Permissions..."
-        android:textSize="18sp"
-        android:layout_marginBottom="24dp"/>
+        android:textSize="18sp" />
 
     <TextView
-        android:id="@+id/textHeartRate"
+        android:id="@+id/textConnectionStatus"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="Heart Rate: --"
-        android:textSize="20sp"
-        android:layout_marginBottom="16dp"/>
-
-    <TextView
-        android:id="@+id/textSpO2"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="SpO2: --"
-        android:textSize="20sp"
-        android:layout_marginBottom="16dp"/>
-
-    <TextView
-        android:id="@+id/textTemp"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="Temperature: --"
-        android:textSize="20sp"
-        android:layout_marginBottom="16dp"/>
+        android:layout_marginBottom="24dp"
+        android:text="Not connected"
+        android:textSize="18sp" />
 
     <Button
-        android:id="@+id/buttonGrantPermissions"
+        android:id="@+id/buttonConnect"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="Grant Permissions" />
+        android:layout_marginBottom="16dp"
+        android:text="Connect" />
+
+    <Button
+        android:id="@+id/buttonDisconnect"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Disconnect" />
 
 </LinearLayout>
