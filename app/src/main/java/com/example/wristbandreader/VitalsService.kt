@@ -428,18 +428,23 @@ class VitalsService : Service() {
 
     private val wristbandName = "J2208A2 E4F7"
     private val wristbandMac = "CD:27:0B:30:E4:F7"
-    private val wristbandServiceUUID = UUID.fromString("0000fff0-0000-1000-8000-00805f9b34fb") // Replace with correct service UUID
-    private val wristbandNotifyUUID = UUID.fromString("0000fff7-0000-1000-8000-00805f9b34fb") // Replace if needed
+    private val wristbandServiceUUID = UUID.fromString("0000fff0-0000-1000-8000-00805f9b34fb")
+    private val wristbandNotifyUUID = UUID.fromString("0000fff7-0000-1000-8000-00805f9b34fb")
 
-    private val client = OkHttpClient.Builder()
-        .callTimeout(15, TimeUnit.SECONDS)
-        .build()
+    private val client = OkHttpClient.Builder().callTimeout(15, TimeUnit.SECONDS).build()
+
+    private var spo2Sent = false
+    private var retryCount = 0
+    private val maxRetries = 3
+
+    private lateinit var gattCallback: BluetoothGattCallback
 
     override fun onCreate() {
         super.onCreate()
         Log.d("VitalsService", "SERVICE STARTED")
         createNotificationChannel()
         startForeground(1, buildNotification())
+        setupGattCallback()
 
         if (!hasScanPermission() || !hasConnectPermission()) {
             Log.e("VitalsService", "BLE permissions missing. Request them from Activity.")
@@ -467,6 +472,12 @@ class VitalsService : Service() {
             .setSmallIcon(android.R.drawable.ic_menu_info_details)
             .build()
 
+    private fun notifyConnectionStatus(status: String) {
+        val intent = Intent("com.example.wristbandreader.CONNECTION_STATUS")
+        intent.putExtra("status", status)
+        sendBroadcast(intent)
+    }
+
     @SuppressLint("MissingPermission")
     private fun startScanSafe() {
         val manager = getSystemService(BLUETOOTH_SERVICE) as BluetoothManager
@@ -483,7 +494,7 @@ class VitalsService : Service() {
             return
         }
 
-        val scanFilters = listOf<ScanFilter>() // Filter in callback
+        val scanFilters = listOf<ScanFilter>()
         val scanSettings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .build()
@@ -499,10 +510,7 @@ class VitalsService : Service() {
             val name = device.name ?: result.scanRecord?.deviceName ?: "NULL"
 
             if (name == wristbandName || device.address.equals(wristbandMac, ignoreCase = true)) {
-                Log.d(
-                    "VitalsService",
-                    "Target Wristband Found → Name=$name | MAC=${device.address} | RSSI=${result.rssi}"
-                )
+                Log.d("VitalsService", "Target Wristband Found → Name=$name | MAC=${device.address} | RSSI=${result.rssi}")
                 stopScanSafe(this)
                 connectToDeviceSafe(device)
             } else {
@@ -533,177 +541,172 @@ class VitalsService : Service() {
     }
 
     @SuppressLint("MissingPermission")
-    private val gattCallback = object : BluetoothGattCallback() {
+    private fun setupGattCallback() {
+        gattCallback = object : BluetoothGattCallback() {
 
-        override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
-            Log.d("VitalsService", "ConnectionStateChange → status=$status newState=$newState")
-            if (status != BluetoothGatt.GATT_SUCCESS) {
-                Log.e("VitalsService", "GATT ERROR, closing connection")
-                gatt.close()
-                return
-            }
-            when (newState) {
-                BluetoothProfile.STATE_CONNECTED -> {
-                    Log.d("VitalsService", "Connected, discovering services...")
-                    gatt.discoverServices()
-                }
-                BluetoothProfile.STATE_DISCONNECTED -> {
-                    Log.e("VitalsService", "Disconnected")
+            override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+                Log.d("VitalsService", "ConnectionStateChange → status=$status newState=$newState")
+                if (status != BluetoothGatt.GATT_SUCCESS) {
+                    Log.e("VitalsService", "GATT ERROR $status")
                     gatt.close()
+                    retryConnection(gatt.device)
+                    return
+                }
+                when (newState) {
+                    BluetoothProfile.STATE_CONNECTED -> {
+                        Log.d("VitalsService", "Connected, discovering services...")
+                        notifyConnectionStatus("Connected")
+                        gatt.discoverServices()
+                        retryCount = 0
+                    }
+                    BluetoothProfile.STATE_DISCONNECTED -> {
+                        Log.e("VitalsService", "Disconnected")
+                        gatt.close()
+                        sendVitalsToBackend("", "", "", System.currentTimeMillis().toString())
+                        notifyConnectionStatus("Disconnected")
+                        retryConnection(gatt.device)
+                    }
                 }
             }
-        }
 
-        @SuppressLint("MissingPermission")
-        override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
-            if (status != BluetoothGatt.GATT_SUCCESS) return
-            Log.d("VitalsService", "Services discovered with status=$status")
-
-            // Find service
-            val targetService = gatt.services.firstOrNull { it.uuid == wristbandServiceUUID }
-            if (targetService == null) {
-                Log.e("VitalsService", "Target service not found")
-                return
+            @SuppressLint("MissingPermission")
+            private fun retryConnection(device: BluetoothDevice) {
+                Handler(Looper.getMainLooper()).postDelayed({
+                    Log.d("VitalsService", "Retrying connection to ${device.name}")
+                    bluetoothGatt = device.connectGatt(this@VitalsService, false, gattCallback)
+                }, 1000)
             }
 
-            // Find write characteristic
-            writeChar = targetService.characteristics.firstOrNull {
-                val props = it.properties
-                (props and BluetoothGattCharacteristic.PROPERTY_WRITE != 0) ||
-                        (props and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE != 0)
-            }
 
-            // Find notify characteristic
-            val notifyChar = targetService.characteristics.firstOrNull {
-                it.uuid == wristbandNotifyUUID && (it.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0)
-            }
+            @SuppressLint("MissingPermission")
+            override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+                if (status != BluetoothGatt.GATT_SUCCESS) return
+                Log.d("VitalsService", "Services discovered")
+                val targetService = gatt.services.firstOrNull { it.uuid == wristbandServiceUUID } ?: run {
+                    Log.e("VitalsService", "Target service not found")
+                    return
+                }
 
-            if (writeChar == null || notifyChar == null) {
-                Log.e("VitalsService", "Suitable characteristics not found")
-                return
-            }
+                writeChar = targetService.characteristics.firstOrNull {
+                    val props = it.properties
+                    (props and BluetoothGattCharacteristic.PROPERTY_WRITE != 0) ||
+                            (props and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE != 0)
+                }
 
-            Log.d(
-                "VitalsService",
-                "Write char: ${writeChar?.uuid} | Notify char: ${notifyChar?.uuid}"
-            )
+                val notifyChar = targetService.characteristics.firstOrNull {
+                    it.uuid == wristbandNotifyUUID && (it.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0)
+                }
 
-            // Enable notifications
-            notifyChar.let { char ->
-                gatt.setCharacteristicNotification(char, true)
-                char.getDescriptor(UUID.fromString("00002902-0000-1000-8000-00805f9b34fb"))?.apply {
+                if (writeChar == null || notifyChar == null) {
+                    Log.e("VitalsService", "Suitable characteristics not found")
+                    return
+                }
+
+                gatt.setCharacteristicNotification(notifyChar, true)
+                notifyChar.getDescriptor(UUID.fromString("00002902-0000-1000-8000-00805f9b34fb"))?.apply {
                     value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
                     gatt.writeDescriptor(this)
                 }
+
+                Handler(Looper.getMainLooper()).postDelayed({
+                    writeChar?.let { wChar ->
+                        wChar.value = BleSDK.GetAutomatic(AutoMode.AutoHeartRate)
+                        gatt.writeCharacteristic(wChar)
+
+                        wChar.value = BleSDK.GetAutomatic(AutoMode.AutoSpo2)
+                        gatt.writeCharacteristic(wChar)
+
+                        wChar.value = BleSDK.GetAutomatic(AutoMode.AutoTemp)
+                        gatt.writeCharacteristic(wChar)
+                    }
+                }, 1200)
             }
 
-            // Start automatic measurement
-            Handler(Looper.getMainLooper()).postDelayed({
-                Log.d("VitalsService", "Enabling automatic reading mode")
+            override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
+                val data = characteristic.value ?: return
+                if (data.isEmpty()) return
+
+                val packetType = data[0].toInt() and 0xFF
+                Log.d("VitalsService", "Received packet type: 0x${packetType.toString(16)}")
+
+                try {
+                    when (packetType) {
+                        0x09, 0x23 -> handleActivityData(data)
+                        0x28, 0x66, 0x60 -> handleSpo2Data(data)
+                        0xFE -> resetMeasurement(gatt)
+                        else -> Log.d("VitalsService", "Unhandled packet type: 0x${packetType.toString(16)}")
+                    }
+                } catch (e: Exception) {
+                    Log.e("VitalsService", "Error parsing packet: ${e.message}")
+                }
+            }
+
+            private fun handleActivityData(data: ByteArray) {
+                val dic = ResolveUtil.getActivityData(data)["dicData"] as? Map<String, String> ?: return
+                val spo2 = dic["Blood_oxygen"]?.toIntOrNull() ?: 0
+                val hr = dic["heartRate"] ?: "Unknown"
+                val temp = dic["TempData"] ?: "Unknown"
+
+                Log.d("VitalsService", "ActivityData → SPO2: $spo2 | HR: $hr | Temp: $temp | Sending: ${!spo2Sent && spo2 > 0}")
+
+                if (!spo2Sent && spo2 > 0) {
+                    sendVitalsToBackend(spo2.toString(), hr, temp, System.currentTimeMillis().toString())
+                    spo2Sent = true
+                } else if (spo2 == 0) {
+                    writeChar?.let {
+                        it.value = BleSDK.GetBloodOxygen(3.toByte(), "00000000")
+                        bluetoothGatt?.writeCharacteristic(it)
+                    }
+                }
+            }
+
+            private fun handleSpo2Data(data: ByteArray) {
+                if (data.size < 4) return
+                val dic = ResolveUtil.getSpo2(data)["dicData"] as? Map<String, String> ?: return
+                val spo2 = dic["Blood_oxygen"] ?: return
+                val hr = dic["Heart_rate"] ?: "Unknown"
+                val temp = dic["Temperature"] ?: "Unknown"
+
+                Log.d("VitalsService", "Spo2Data → SPO2: $spo2 | HR: $hr | Temp: $temp | Sending: ${!spo2Sent}")
+
+                if (!spo2Sent) {
+                    sendVitalsToBackend(spo2, hr, temp, System.currentTimeMillis().toString())
+                    spo2Sent = true
+                }
+            }
+
+            private fun resetMeasurement(gatt: BluetoothGatt) {
+                Log.d("VitalsService", "Double-tap detected → starting measurement")
+                spo2Sent = false
                 writeChar?.let { wChar ->
-                    // HR
-                    wChar.value = BleSDK.GetAutomatic(AutoMode.AutoHeartRate)
-                    gatt.writeCharacteristic(wChar)
-
-                    // SpO2
-                    wChar.value = BleSDK.GetAutomatic(AutoMode.AutoSpo2)
-                    gatt.writeCharacteristic(wChar)
-
-                    // Temp
-                    wChar.value = BleSDK.GetAutomatic(AutoMode.AutoTemp)
-                    gatt.writeCharacteristic(wChar)
-                }
-            }, 1200) // increased delay to ensure notifications are enabled
-        }
-
-        override fun onCharacteristicChanged(
-            gatt: BluetoothGatt,
-            characteristic: BluetoothGattCharacteristic
-        ) {
-            val data = characteristic.value ?: return
-            if (data.isEmpty()) return
-
-            Log.d("VitalsService", "Raw packet: ${data.joinToString("-") { "%02X".format(it) }}")
-
-            try {
-                when (data[0].toInt() and 0xFF) {
-
-                    0xFE -> {
-                        Log.d("VitalsService", "Double-tap detected → requesting instant vitals")
-
-                        writeChar?.let { wChar ->
-                            bluetoothGatt?.let { gatt ->
-
-                                Handler(Looper.getMainLooper()).post {
-                                    wChar.value = BleSDK.StartDeviceMeasurementWithType(3, true, 60)
-                                    val success = gatt.writeCharacteristic(wChar)
-                                    Log.d("VitalsService", "StartDeviceMeasurementWithType(3) sent: $success")
-                                }
-
-                                // MUST SEND SECOND COMMAND → OR NO VITAL DATA
-                                Handler(Looper.getMainLooper()).postDelayed({
-                                    try {
-                                        val packet = BleSDK.GetBloodOxygen(3.toByte(), "00000000")
-                                        wChar.value = packet
-                                        val ok = gatt.writeCharacteristic(wChar)
-                                        Log.d("VitalsService", "Requested current vitals: $ok")
-                                    } catch (e: Exception) {
-                                        Log.e("VitalsService", "Failed to request vitals: ${e.message}")
-                                    }
-                                }, 1000)
-
-                            }
-                        }
+                    Handler(Looper.getMainLooper()).post {
+                        wChar.value = BleSDK.StartDeviceMeasurementWithType(3, true, 60)
+                        gatt.writeCharacteristic(wChar)
                     }
-
-
-                    0x09, 0x28, 0x23, 0x66 -> {
-
+                    Handler(Looper.getMainLooper()).postDelayed({
                         try {
-                            val dic = ResolveUtil.getActivityData(data)["dicData"] as? Map<String, String>
-
-                            dic?.let {
-                                sendVitalsToBackend(
-                                    it["Blood_oxygen"] ?: "Unknown",
-                                    it["heartRate"] ?: "Unknown",
-                                    it["TempData"] ?: "Unknown",
-                                    System.currentTimeMillis().toString()
-                                )
-
-                                Log.d("VitalsService", "Vitals sent to backend: $it")
-                            }
-
-                        } catch (e: Exception) {
-                            Log.e("VitalsService", "Failed to parse vitals: ${e.message}")
-                        }
-                    }
+                            wChar.value = BleSDK.GetBloodOxygen(3.toByte(), "00000000")
+                            gatt.writeCharacteristic(wChar)
+                        } catch (_: Exception) {}
+                    }, 1000)
                 }
-
-            } catch (e: Exception) {
-                Log.e("VitalsService", "Error parsing packet: ${e.message}")
             }
-        }
 
-
-        override fun onDescriptorWrite(
-            gatt: BluetoothGatt,
-            descriptor: BluetoothGattDescriptor,
-            status: Int
-        ) {
-            if (status == BluetoothGatt.GATT_SUCCESS) {
-                Log.d(
-                    "VitalsService",
-                    "Notifications enabled successfully for ${descriptor.characteristic.uuid}"
-                )
-            } else {
-                Log.e("VitalsService", "Failed to enable notifications: $status")
+            override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
+                if (status == BluetoothGatt.GATT_SUCCESS) {
+                    Log.d("VitalsService", "Notifications enabled for ${descriptor.characteristic.uuid}")
+                } else {
+                    Log.e("VitalsService", "Failed to enable notifications: $status")
+                }
             }
         }
     }
 
+    // Updated sendVitalsToBackend with logging backend response
     private fun sendVitalsToBackend(spo2: String, heartRate: String, temperature: String, timestamp: String) {
         Thread {
             try {
+                Log.d("VitalsService", "Sending to backend → SPO2: $spo2 | HR: $heartRate | Temp: $temperature | Timestamp: $timestamp")
                 val json = JSONObject()
                     .put("spo2", spo2)
                     .put("heartRate", heartRate)
@@ -717,7 +720,7 @@ class VitalsService : Service() {
                     .build()
 
                 client.newCall(request).execute().use { response ->
-                    Log.d("VitalsService", "Backend response: ${response.code}")
+                    Log.d("VitalsService", "Backend response code: ${response.code}")
                 }
             } catch (e: Exception) {
                 Log.e("VitalsService", "Failed to send vitals: ${e.message}")
@@ -725,12 +728,14 @@ class VitalsService : Service() {
         }.start()
     }
 
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     @SuppressLint("MissingPermission")
     override fun onDestroy() {
         Log.d("VitalsService", "Service destroyed")
         bluetoothGatt?.close()
+        sendVitalsToBackend("", "", "", System.currentTimeMillis().toString()) // Ensure backend gets empty on destroy
         super.onDestroy()
     }
 
@@ -742,3 +747,4 @@ class VitalsService : Service() {
         ContextCompat.checkSelfPermission(this, android.Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
     else true
 }
+

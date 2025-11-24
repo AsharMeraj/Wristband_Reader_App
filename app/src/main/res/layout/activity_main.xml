@@ -3,36 +3,35 @@
     android:id="@+id/mainLayout"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
+    android:orientation="vertical"
     android:gravity="center"
     android:padding="16dp">
-
-    <TextView
-        android:id="@+id/textPermissions"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginBottom="16dp"
-        android:text="Requesting Permissions..."
-        android:textSize="18sp" />
 
     <TextView
         android:id="@+id/textConnectionStatus"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginBottom="24dp"
         android:text="Not connected"
-        android:textSize="18sp" />
+        android:textSize="20sp"
+        android:layout_marginBottom="32dp"
+        android:gravity="center" />
 
     <Button
         android:id="@+id/buttonConnect"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginBottom="16dp"
-        android:text="Connect" />
+        android:layout_width="280dp"
+        android:layout_height="60dp"
+        android:text="Connect to Wristband"
+        android:textSize="18sp"
+        android:maxLines="1"
+        android:layout_marginBottom="20dp" />
 
     <Button
         android:id="@+id/buttonDisconnect"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="Disconnect" />
+        android:layout_width="280dp"
+        android:layout_height="60dp"
+        android:text="Disconnect Wristband"
+        android:textSize="18sp"
+        android:maxLines="1" />
+
 
 </LinearLayout>
