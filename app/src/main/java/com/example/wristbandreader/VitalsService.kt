@@ -539,6 +539,7 @@ class VitalsService : Service() {
         }
         Log.d("VitalsService", "Connecting to device → ${device.name ?: "NULL"} / ${device.address}")
     }
+    private var isManualDisconnect = false
 
     @SuppressLint("MissingPermission")
     private fun setupGattCallback() {
@@ -546,28 +547,44 @@ class VitalsService : Service() {
 
             override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
                 Log.d("VitalsService", "ConnectionStateChange → status=$status newState=$newState")
+
                 if (status != BluetoothGatt.GATT_SUCCESS) {
                     Log.e("VitalsService", "GATT ERROR $status")
                     gatt.close()
-                    retryConnection(gatt.device)
+
+                    if (!isManualDisconnect) {
+                        retryConnection(gatt.device)
+                    }
                     return
                 }
+
                 when (newState) {
+
                     BluetoothProfile.STATE_CONNECTED -> {
                         Log.d("VitalsService", "Connected, discovering services...")
                         notifyConnectionStatus("Connected")
                         gatt.discoverServices()
                         retryCount = 0
                     }
+
                     BluetoothProfile.STATE_DISCONNECTED -> {
                         Log.e("VitalsService", "Disconnected")
+
                         gatt.close()
-                        sendVitalsToBackend("", "", "", System.currentTimeMillis().toString())
+
                         notifyConnectionStatus("Disconnected")
-                        retryConnection(gatt.device)
+
+                        // ↓ ONLY retry if disconnect was NOT manual
+                        if (!isManualDisconnect) {
+                            retryConnection(gatt.device)
+                        } else {
+                            // Reset for next time
+                            isManualDisconnect = false
+                        }
                     }
                 }
             }
+
 
             @SuppressLint("MissingPermission")
             private fun retryConnection(device: BluetoothDevice) {
